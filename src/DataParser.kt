@@ -86,10 +86,19 @@ object DataParser {
         }
     }
 
-
+    /**
+     * Converte uma string para um array de bytes usando a codificação UTF-16LE.
+     *
+     * Esta codificação é utilizada por algumas aplicações Windows, como o
+     * Notepad, para armazenar texto em memória. Ao realizar buscas de
+     * valores do tipo string na memória, recomenda-se testar tanto UTF-8
+     * (via [toBytes]) quanto UTF-16LE (via este metodo) para capturar
+     * diferentes representações de um mesmo texto.
+     *
+     * @param value Texto a ser convertido.
+     * @return Array de bytes representando a string em UTF-16 little endian.
+     */
     fun toBytesUtf16LE(value: String): ByteArray =
         value.toByteArray(Charsets.UTF_16LE)
 
-    fun fromBytesUtf16LE(bytes: ByteArray): String =
-        String(bytes, Charsets.UTF_16LE)
 }

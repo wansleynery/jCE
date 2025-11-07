@@ -10,38 +10,74 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.min
 
+/**
+ * Funções utilitárias para leitura e varredura de memória de processos Windows.
+ *
+ * A API disponibilizada aqui permite ler blocos arbitrários de memória de um processo,
+ * varrer regiões legíveis em busca de padrões de bytes e filtrar listas de endereços.
+ *
+ * Algumas funções, como [Memory.listPointers], permanecem na base de código para suporte
+ * a futuras funcionalidades de exploração de ponteiros, mas não são utilizadas
+ * pelo aplicativo principal neste momento. Essas funções foram anotadas como
+ * @Deprecated para indicar que podem ser removidas em versões futuras.
+ */
+/**
+ * Utilitário de acesso à memória de processos no Windows via JNA.
+ *
+ * Esta classe contém funções para ler regiões de memória de um processo
+ * representado por um [WinNT.HANDLE], percorrer regiões commitadas e
+ * legíveis, buscar padrões arbitrários de bytes (como valores inteiros,
+ * floats ou cadeias de texto) e filtrar resultados. É fundamental para
+ * implementar funções semelhantes às do Cheat Engine, permitindo
+ * vasculhar a memória de outro processo a partir de um PID.
+ *
+ * As funções aqui utilizam a API [Kernel32] do JNA para chamar
+ * métodos do Windows (como `ReadProcessMemory` e `VirtualQueryEx`).
+ */
 object Memory {
 
-    // Lê um bloco de memória (endereço, tamanho) retornando bytes ou null
-    fun read (
+    /**
+     * Lê um bloco de memória do processo alvo.
+     *
+     * @param handle handle do processo aberto com permissão de leitura.
+     * @param address endereço absoluto de onde iniciar a leitura.
+     * @param size quantidade de bytes a serem lidos.
+     * @return array de bytes com o conteúdo lido ou `null` se a leitura falhar
+     *         ou retornar zero bytes.
+     */
+    fun read(
         handle: WinNT.HANDLE,
         address: Long,
         size: Int
     ): ByteArray? {
 
         val buffer = JnaMemory(size.toLong())
-        val bytesRead = IntByReference (0)
-        val ok = Kernel32.INSTANCE.ReadProcessMemory (
+        val bytesRead = IntByReference(0)
+        val ok = Kernel32.INSTANCE.ReadProcessMemory(
             handle,
-            Pointer.createConstant (address),
+            Pointer.createConstant(address),
             buffer,
             size,
             bytesRead
         )
 
         return if (ok && bytesRead.value > 0) {
-            buffer.getByteArray (0, bytesRead.value)
+            buffer.getByteArray(0, bytesRead.value)
         } else null
     }
 
     /**
      * Varre regiões commitadas e legíveis do processo e faz scan por possíveis ponteiros.
      * Retorna até `maxPointers` ponteiros (endereços) coletados.
-     */
-    fun listPointers (
+      */
+    @Deprecated(
+        message = "Esta função não é utilizada atualmente. Foi mantida para possível uso futuro em explorações de ponteiros.",
+        level = DeprecationLevel.WARNING
+    )
+    fun listPointers(
         handle: WinNT.HANDLE,
         maxPointers: Int = -1
-    ): List <Long> {
+    ): List<Long> {
 
         val kernel      = Kernel32.INSTANCE
         val pointerSize = Native.POINTER_SIZE    // 4 ou 8
@@ -49,18 +85,18 @@ object Memory {
         val results     = mutableListOf <Long> ()
 
         // Endereço inicial (0) e limite pragmático (para 64-bit usa 0x7FFF...; aqui usamos Long.MAX)
-        var address = Pointer.createConstant (0L)
+        var regionStart = Pointer.createConstant(0L)
 
         val maximumResults = if (maxPointers < 1) Int.MAX_VALUE else maxPointers
         while (results.size < maximumResults) {
 
             // VirtualQueryEx retorna o tamanho preenchido ou 0 em falha
-            val memInfoSize = BaseTSD.SIZE_T (memInfo.size ().toLong ())
-            val rc = kernel.VirtualQueryEx (handle, address, memInfo, memInfoSize)
+            val memInfoSize = BaseTSD.SIZE_T(memInfo.size().toLong())
+            val rc = kernel.VirtualQueryEx(handle, regionStart, memInfo, memInfoSize)
             if (rc.toLong () == 0L) break
 
-            val baseAddr   = Pointer.nativeValue (memInfo.baseAddress)
-            val regionSize = memInfo.regionSize.toLong () // Tamanho da região
+            val baseAddr = Pointer.nativeValue(memInfo.baseAddress)
+            val regionSize = memInfo.regionSize.toLong() // Tamanho da região
 
             // Filtrar somente regiões commitadas com permissão de leitura
             val stateCommitted = memInfo.state.toInt () == WinNT.MEM_COMMIT
@@ -114,15 +150,23 @@ object Memory {
 
             // Próxima região
             val next = baseAddr + regionSize
-            if (next <= Pointer.nativeValue (address)) break // evita loop infinito
-            address = Pointer.createConstant (next)
+            if (next <= Pointer.nativeValue(regionStart)) break // evita loop infinito
+            regionStart = Pointer.createConstant(next)
         }
 
         // Remove duplicados e limita
-        return results.distinct ().take (maximumResults)
+        return results.distinct().take(maximumResults)
     }
 
-    fun isReadableAddress (
+    /**
+     * Verifica se um endereço de memória pertence a uma região commitada e legível.
+     *
+     * @param handle handle do processo alvo.
+     * @param address endereço absoluto a ser validado.
+     * @return `true` se o endereço estiver em uma região commitada com permissão de leitura,
+     *         caso contrário `false`.
+     */
+    fun isReadableAddress(
         handle: WinNT.HANDLE,
         address: Long
     ): Boolean {
@@ -136,8 +180,8 @@ object Memory {
         )
         if (rc2.toLong () == 0L) return false
 
-        val committed = memoryInformation.state.toInt () == WinNT.MEM_COMMIT
-        val protected = memoryInformation.protect.toInt ()
+        val committed = memoryInformation.state.toInt() == WinNT.MEM_COMMIT
+        val protected = memoryInformation.protect.toInt()
         val readable =
             (protected and WinNT.PAGE_READWRITE)         != 0 ||
             (protected and WinNT.PAGE_READONLY)          != 0 ||
@@ -149,10 +193,16 @@ object Memory {
 
     }
 
-    fun close (
+    /**
+     * Fecha o handle do processo aberto. Deve ser chamado sempre que terminar
+     * as operações de leitura para liberar recursos do sistema.
+     *
+     * @param handle handle do processo a ser fechado.
+     */
+    fun close(
         handle: WinNT.HANDLE
     ) {
-        Kernel32.INSTANCE.CloseHandle (handle)
+        Kernel32.INSTANCE.CloseHandle(handle)
     }
 
     /**
@@ -262,8 +312,11 @@ object Memory {
 
     /**
      * Filtra uma lista de endereços verificando se o conteúdo da memória nesses endereços
-     * é exatamente igual ao padrão fornecido. Os endereços para os quais a leitura falha
-     * ou cujo conteúdo não coincide são descartados.
+     * é exatamente igual ao padrão fornecido. Para pesquisas de texto,
+     * recomenda-se verificar se há um terminador nulo logo após o valor (ver
+     * `App.kt` para exemplo), pois esta função não diferencia substrings de strings
+     * maiores. Os endereços para os quais a leitura falha ou cujo conteúdo não
+     * coincide são descartados.
      *
      * @param handle Handle do processo a ler.
      * @param addresses Lista de endereços candidatos.
@@ -279,6 +332,44 @@ object Memory {
         return addresses.filter { addr ->
             val data = read(handle, addr, size)
             data != null && data.contentEquals(pattern)
+        }
+    }
+
+    /**
+     * Filtra uma lista de endereços para valores de string, verificando se o conteúdo
+     * da memória nesses endereços corresponde exatamente ao padrão fornecido **e**
+     * está imediatamente seguido por bytes nulos (terminador \u0000). Esta checagem
+     * reduz falsos positivos quando o padrão é apenas uma substring de uma string
+     * maior em memória (por exemplo, "ready" em "ready345").
+     *
+     * A verificação do terminador lê dois bytes após o padrão e exige que ambos
+     * sejam zero. Isso cobre tanto strings UTF-8 (terminadas com um único 0x00,
+     * onde o segundo byte lido também será zero) quanto UTF-16LE/BE (terminadas
+     * com 0x00 0x00).
+     *
+     * @param handle Handle do processo para leitura de memória.
+     * @param addresses Lista de endereços candidatos.
+     * @param pattern Padrão de bytes da string que deve existir integralmente na memória.
+     * @return Lista de endereços cujo conteúdo é uma correspondência exata
+     *         terminada com bytes nulos.
+     */
+    @Suppress ("unused")
+    fun filterStringExactMatches(
+        handle: WinNT.HANDLE,
+        addresses: List<Long>,
+        pattern: ByteArray
+    ): List<Long> {
+        val size = pattern.size
+        return addresses.filter { addr ->
+            val valueBytes = read(handle, addr, size)
+            // Primeiro, garante que o valor lido corresponde ao padrão solicitado
+            if (valueBytes == null || !valueBytes.contentEquals(pattern)) {
+                false
+            } else {
+                // Em seguida, verifica se os bytes subsequentes são zeros (terminador)
+                val terminatorBytes = read(handle, addr + size, 2)
+                terminatorBytes != null && terminatorBytes.all { it == 0.toByte() }
+            }
         }
     }
 
