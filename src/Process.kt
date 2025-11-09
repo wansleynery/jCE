@@ -1,147 +1,77 @@
+import UI.toPrettyName
 import com.sun.jna.platform.win32.Kernel32
 import com.sun.jna.platform.win32.WinNT
-import main.Properties
 import oshi.SystemInfo
 import oshi.software.os.OSProcess
 import oshi.software.os.OperatingSystem
 import java.io.File
-import java.util.Locale
 
 object Process {
 
-    fun selectProcess (
-        language: String
-    ): OSProcess {
-
-        while (true) {
-
-            print (Properties.get ("$language.prompt.enterProcess")) // exibe dica
-            val input = readlnOrNull ()?.trim ().orEmpty ()
-            if (input.isEmpty ()) {
-                println (Properties.get ("$language.info.emptyInput"))
-                continue
-            }
-
-            // Se for PID numérico, trata direto
-            input.toIntOrNull ()?.let { pid ->
-                open (pid)?.let { handle ->
-
-                    // Fecha o handle de teste e pega o OSProcess via listagem
-                    Memory.close (handle)
-
-                    val hit = findBy ("^$pid$").firstOrNull ()?.second
-                    if (hit != null) {
-                        println (
-                            Properties.get (
-                                "$language.info.selected",
-                                mapOf ("pid" to hit.processID.toString (), "name" to (hit.name ?: ""))
-                            )
-                        )
-                        return hit
-                    }
-
-                }
-
-                println (
-                    Properties.get (
-                        "$language.error.processNotFound",
-                        mapOf ("processName" to input)
-                    )
-                )
-                return@let
-            }
-
-            // Nome/regex: usa findBy com regex
-            val matches = findBy(input)
-            if (matches.isEmpty()) {
-                println (
-                    Properties.get (
-                        "$language.error.processNotFound",
-                        mapOf ("processName" to input)
-                    )
-                )
-                continue
-            }
-
-            if (matches.size == 1) {
-                val only = matches.first ().second
-                println (
-                    Properties.get (
-                        "$language.info.selected",
-                        mapOf (
-                            "pid" to only.processID.toString (),
-                            "name" to (only.name ?: "")
-                        )
-                    )
-                )
-                return only
-            }
-
-            // Lista múltiplos resultados
-            println (
-                Properties.get (
-                    "$language.info.foundN",
-                    mapOf (
-                        "count" to matches.size.toString (),
-                        "query" to input
-                    )
-                )
-            )
-
-            matches.forEachIndexed { idx, pair ->
-                val meta = pair.first.split (';') // "pid;exe;Pretty"
-                val pid  = meta.getOrNull (0) ?: "????"
-                val exe  = meta.getOrNull (1) ?: "unknown.exe"
-                val nice = meta.getOrNull (2) ?: exe
-                println ("  [$idx] PID $pid  -  $nice  ($exe)")
-            }
-
-            while (true) {
-                print (
-                    Properties.get (
-                        "$language.prompt.chooseIndex",
-                        mapOf (
-                            "min" to "0",
-                            "max" to matches.lastIndex.toString ()
-                        )
-                    )
-                )
-
-                val pick = readlnOrNull ()?.trim ().orEmpty ()
-                if (pick.isEmpty ()) break // cancela e volta a perguntar o termo
-
-                val i = pick.toIntOrNull()
-                if (i != null && i in matches.indices) {
-                    val chosen = matches[i].second
-                    println (
-                        Properties.get (
-                            "$language.info.selected",
-                            mapOf (
-                                "pid" to chosen.processID.toString (),
-                                "name" to (chosen.name ?: "")
-                            )
-                        )
-                    )
-                    return chosen
-                }
-
-                println (Properties.get ("$language.error.invalidIndex"))
-            }
-        }
+    sealed class ResolveResult {
+        data class Single (val process: OSProcess) : ResolveResult ()
+        data class Multiple (val matches: List <Pair <String, OSProcess>>) : ResolveResult ()
+        data object NotFound : ResolveResult ()
     }
+
+    fun resolve (
+        identifier: String
+    ): ResolveResult {
+
+        // PID numérico?
+        identifier.toIntOrNull ()?.let { pid ->
+
+            open (pid)?.let {
+
+                // handle ok: fecha handle de teste e devolve o OSProcess correspondente
+                Memory.close (it)
+
+                val hit = findBy ("^$pid$").firstOrNull ()?.second
+                if (hit != null) return ResolveResult.Single (hit)
+
+            }
+
+            return ResolveResult.NotFound
+
+        }
+
+        // Regex/nome
+        val matches = findBy (identifier)
+
+        return when (matches.size) {
+            0  -> ResolveResult.NotFound
+            1  -> ResolveResult.Single (matches.first ().second)
+            else -> ResolveResult.Multiple (matches)
+        }
+
+    }
+
 
     // Abre o processo com permissão de leitura (PROCESS_VM_READ)
     fun open (
         pid: Int
     ): WinNT.HANDLE? {
-        val dwDesiredAccess = Kernel32.PROCESS_VM_READ or Kernel32.PROCESS_QUERY_INFORMATION
-        val handle = Kernel32.INSTANCE.OpenProcess (dwDesiredAccess, false, pid)
-        return if (handle != null && !WinNT.INVALID_HANDLE_VALUE.equals (handle)) handle else null
+
+        val desired =
+            WinNT.PROCESS_QUERY_INFORMATION or
+            WinNT.PROCESS_VM_READ           or
+            WinNT.PROCESS_VM_WRITE          or
+            WinNT.PROCESS_VM_OPERATION
+
+        val handle = Kernel32.INSTANCE.OpenProcess (desired, false, pid)
+
+        return (
+            if (handle != null && WinNT.INVALID_HANDLE_VALUE != handle)
+                handle
+            else
+                null
+        )
     }
 
     fun findBy (
         identifier: String
     ): List <Pair <String, OSProcess>> {
+
         val processes = list ()
 
         // Tente tratar como regex (case-insensitive). Se inválido, cai no contains ignoreCase
@@ -166,6 +96,7 @@ object Process {
         } else {
             processes.filter { it.first.contains (identifier, ignoreCase = true) }
         }
+
     }
 
     /**
@@ -196,30 +127,10 @@ object Process {
                 val exeName = (
                     try { File (exePath).name } catch (_: Exception) { "" }
                 ).ifBlank { process.name ?: "unknown" }
-                val pretty  = toPrettyName (exeName).uppercase ()
+                val pretty  = exeName.toPrettyName ().uppercase ()
 
                 Pair ("$pid;$exeName;$pretty", process)
             }
     }
-
-    /**
-     * Heurística de "nome bonito": remove extensão, troca separadores por espaço e capitaliza.
-     * Ex: "chrome.exe" -> "Chrome", "visual_studio_code" -> "Visual Studio Code"
-     */
-    private fun toPrettyName (exe: String): String {
-            val base = exe.removeSuffix (".exe")
-                .removeSuffix (".bin")
-                .removeSuffix (".app")
-                .removeSuffix (".out")
-
-            return base
-                .replace (Regex ("[_\\-]+"), " ")
-                .trim ()
-                .lowercase (Locale.getDefault ())
-                .split (' ')
-                .filter { it.isNotBlank () }
-                .joinToString (" ") { it.replaceFirstChar { c -> c.titlecase (Locale.getDefault ()) } }
-                .ifBlank { exe }
-        }
 
 }
